@@ -43,6 +43,7 @@ The first local login is `admin` / `admin`. Synfull requires a new password of a
 | --- | --- |
 | `synfull setup` | Ask setup options and prepare the isolated Python runtime/dependencies. |
 | `synfull start` | Start Synfull in the background. |
+| `synfull reload` | Refresh installed application files from the current CLI package and restart the service/background instance. |
 | `synfull run` | Run Synfull in the foreground. |
 | `synfull status` | Show process status, dashboard address, and data location. |
 | `synfull stop` | Stop a background instance. |
@@ -50,7 +51,7 @@ The first local login is `admin` / `admin`. Synfull requires a new password of a
 | `synfull install-service` | Explicitly register automatic startup (Windows sign-in task or Linux systemd service). |
 | `synfull uninstall-service` | Remove startup registration; retain application data. |
 
-Service registration is optional and is never performed by npm installation. On Linux, installing or removing the system-wide systemd service requires `sudo`; Synfull runs as the invoking user, not as root.
+Service registration is optional and is never performed by npm installation. On Linux, installing or removing the system-wide systemd service requires `sudo`; Synfull runs as the invoking user, not as root. After updating the global npm package, run `synfull reload` to refresh the installed runtime and restart it. Reload does not download or install npm updates itself; use `npm update -g synfull` first.
 
 ## Optional integrations and security
 

@@ -224,6 +224,92 @@ function stopServer() {
   fs.rmSync(PID_FILE, { force: true })
   console.log('Synfull stopped.')
 }
+function processExists(pid) {
+  try { process.kill(pid, 0); return true } catch (error) { return error.code === 'EPERM' }
+}
+function sleep(milliseconds) {
+  return new Promise(resolve => setTimeout(resolve, milliseconds))
+}
+async function waitForProcessExit(pid, timeoutMs = 15000) {
+  const deadline = Date.now() + timeoutMs
+  while (processExists(pid) && Date.now() < deadline) await sleep(250)
+  if (processExists(pid)) throw new Error(`Synfull process ${pid} did not stop; the runtime was not updated.`)
+}
+function windowsTaskStatus() {
+  const result = spawnSync('schtasks.exe', ['/Query', '/TN', 'Synfull', '/FO', 'LIST'], { encoding: 'utf8', windowsHide: true })
+  if (result.status !== 0) return null
+  const status = (result.stdout || '').match(/^Status:\s*(.+)$/im)
+  return status?.[1]?.trim() || 'Ready'
+}
+async function waitForWindowsTaskStopped(timeoutMs = 15000) {
+  const deadline = Date.now() + timeoutMs
+  while (/running/i.test(windowsTaskStatus() || '') && Date.now() < deadline) await sleep(500)
+  if (/running/i.test(windowsTaskStatus() || '')) throw new Error('Synfull scheduled task did not stop; the runtime was not updated.')
+}
+async function reloadServer(options = {}) {
+  const windows = options.windows ?? WINDOWS
+  const spawnCommand = options.spawnSync || spawnSync
+  const runCommand = options.run || run
+  const ensure = options.ensureRuntime || ensureRuntime
+  const processAlive = options.processExists || processExists
+  const stop = options.stopServer || stopServer
+  const start = options.startServer || (() => startServer(false))
+  const startScheduledTask = options.startScheduledTask || (() => runCommand('schtasks.exe', ['/Run', '/TN', 'Synfull']))
+  const pidFile = options.pidFile || PID_FILE
+
+  if (windows) {
+    const query = spawnCommand('schtasks.exe', ['/Query', '/TN', 'Synfull', '/FO', 'LIST'], { encoding: 'utf8', windowsHide: true })
+    const status = query.status === 0 ? ((query.stdout || '').match(/^Status:\s*(.+)$/im)?.[1]?.trim() || 'Ready') : null
+    if (status !== null) {
+      if (/running/i.test(status)) {
+        runCommand('schtasks.exe', ['/End', '/TN', 'Synfull'])
+        const waitForTask = options.waitForWindowsTaskStopped || waitForWindowsTaskStopped
+        await waitForTask()
+      }
+      ensure()
+      startScheduledTask()
+      console.log('Synfull runtime refreshed and scheduled task started.')
+      return
+    }
+  } else {
+    const service = spawnCommand('systemctl', ['cat', 'synfull-npm.service'], { stdio: 'ignore', windowsHide: true })
+    if (service.status === 0) {
+      const active = spawnCommand('systemctl', ['is-active', '--quiet', 'synfull-npm.service'], { stdio: 'ignore', windowsHide: true }).status === 0
+      if (active) runCommand('sudo', ['systemctl', 'stop', 'synfull-npm.service'])
+      try {
+        ensure()
+      } catch (error) {
+        if (active) {
+          try { runCommand('sudo', ['systemctl', 'start', 'synfull-npm.service']) }
+          catch (restartError) { error.message += ` The previous service could not be restored: ${restartError.message}` }
+        }
+        throw error
+      }
+      if (!active) {
+        console.log('Synfull runtime refreshed; the systemd service was already stopped and remains stopped.')
+        return
+      }
+      runCommand('sudo', ['systemctl', 'start', 'synfull-npm.service'])
+      const restarted = spawnCommand('systemctl', ['is-active', '--quiet', 'synfull-npm.service'], { stdio: 'ignore', windowsHide: true }).status === 0
+      if (!restarted) throw new Error('Synfull runtime was refreshed, but the systemd service did not become active. Check `systemctl status synfull-npm.service`.')
+      console.log('Synfull runtime refreshed and systemd service started.')
+      return
+    }
+  }
+
+  if (fs.existsSync(pidFile)) {
+    const pid = Number(fs.readFileSync(pidFile, 'utf8'))
+    if (Number.isInteger(pid) && processAlive(pid)) {
+      stop()
+      const waitForExit = options.waitForProcessExit || waitForProcessExit
+      await waitForExit(pid)
+    } else {
+      fs.rmSync(pidFile, { force: true })
+    }
+  }
+  ensure()
+  start()
+}
 function status() {
   let running = false
   let pid = ''
@@ -276,7 +362,7 @@ function uninstallStartup() {
   console.log('Synfull startup registration removed; application data was retained.')
 }
 function help() {
-  console.log(`Synfull ${VERSION}\n\nUsage: synfull <command>\n\nCommands:\n  setup             Prepare local runtime and install Python dependencies\n  start             Start Synfull in the background\n  run               Run Synfull in the foreground (for service managers)\n  stop              Stop a background Synfull process\n  status            Show status and local URLs\n  open              Open the local dashboard\n  install-service   Register start-at-login (Windows) or start-at-boot (Linux)\n  uninstall-service Remove startup registration without deleting data\n\nSetup asks whether to allow LAN connections; localhost-only is the default. Use a trusted LAN, open the port in your firewall only as needed, and change the initial admin password locally before remote sign-in.`)
+  console.log(`Synfull ${VERSION}\n\nUsage: synfull <command>\n\nCommands:\n  setup             Prepare local runtime and install Python dependencies\n  start             Start Synfull in the background\n  reload            Refresh installed files from this package and restart Synfull\n  run               Run Synfull in the foreground (for service managers)\n  stop              Stop a background Synfull process\n  status            Show status and local URLs\n  open              Open the local dashboard\n  install-service   Register start-at-login (Windows) or start-at-boot (Linux)\n  uninstall-service Remove startup registration without deleting data\n\nSetup asks whether to allow LAN connections; localhost-only is the default. Use a trusted LAN, open the port in your firewall only as needed, and change the initial admin password locally before remote sign-in.`)
 }
 async function main() {
   const command = process.argv[2]
@@ -290,6 +376,7 @@ async function main() {
     console.log(`Runtime ready. Data directory: ${STATE_DIR}`)
   }
   else if (command === 'start') startServer(false)
+  else if (command === 'reload') await reloadServer()
   else if (command === 'run') startServer(true)
   else if (command === 'stop') stopServer()
   else if (command === 'status') status()
@@ -304,4 +391,4 @@ async function main() {
   else help()
 }
 if (require.main === module) main().catch(error => { console.error(`Synfull: ${error.message}`); process.exitCode = 1 })
-module.exports = { ensureRuntime, serverEnvironment, configuredBindHost, selectedBindHost, saveBindHost, configureDockerAccess, restartSynfullService, APP_DIR, STATE_DIR, ROOT }
+module.exports = { ensureRuntime, serverEnvironment, configuredBindHost, selectedBindHost, saveBindHost, configureDockerAccess, restartSynfullService, reloadServer, APP_DIR, STATE_DIR, ROOT }
