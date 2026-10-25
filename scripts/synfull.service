@@ -1,0 +1,23 @@
+[Unit]
+Description=Synfull cross-platform host monitoring dashboard
+After=network.target
+
+[Service]
+Type=simple
+User=synfull
+Group=synfull
+WorkingDirectory=/opt/synfull
+Environment=SYNFULL_BIND_HOST=0.0.0.0
+Environment=SYNFULL_BIND_PORT=8000
+Environment=SYNFULL_STATE_DIR=/var/lib/synfull
+ExecStart=/opt/synfull/.venv/bin/uvicorn app.main:app --app-dir /opt/synfull/backend --host ${SYNFULL_BIND_HOST} --port ${SYNFULL_BIND_PORT}
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/synfull
+
+[Install]
+WantedBy=multi-user.target
