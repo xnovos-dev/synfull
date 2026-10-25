@@ -1,6 +1,6 @@
 {
   "name": "synfull",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Local-first cross-platform host monitoring dashboard",
   "license": "MIT",
   "type": "commonjs",

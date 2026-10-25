@@ -1,4 +1,7 @@
 from dataclasses import asdict
+from pathlib import Path
+import json
+import re
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 
@@ -15,6 +18,16 @@ from ..schemas.management import AdminSetup, BackupTargetsUpdate, EndpointTarget
 from ..services import management
 
 router = APIRouter(prefix="/api/v1")
+
+
+def installed_version() -> str:
+    for package_file in (Path(__file__).resolve().parents[3] / "package.json",
+                         Path(__file__).resolve().parents[4] / "package.json"):
+        try:
+            return json.loads(package_file.read_text(encoding="utf-8"))["version"]
+        except (OSError, KeyError, json.JSONDecodeError):
+            continue
+    return "unknown"
 
 
 @router.get("/auth/status")
@@ -271,6 +284,33 @@ def security_summary(request: Request):
             "service_allowlist": management.management_settings()["service_allowlist"]}
 
 
+@router.get("/settings/update-check")
+def check_for_update(request: Request):
+    management.require_admin(request)
+    import urllib.error
+    import urllib.request
+
+    current = installed_version()
+    request_message = urllib.request.Request(
+        "https://registry.npmjs.org/synfull/latest",
+        headers={"Accept": "application/json", "User-Agent": "Synfull-update-check"},
+    )
+    try:
+        with urllib.request.urlopen(request_message, timeout=4) as response:
+            package = json.loads(response.read(100_000).decode("utf-8"))
+        latest = package.get("version")
+        if not isinstance(latest, str) or not re.fullmatch(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?", latest):
+            raise ValueError("Package registry returned an invalid version")
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=503, detail="Unable to check npm for updates. Please try again later.") from exc
+    current_core = tuple(int(part) for part in current.split(".")[:3]) if re.fullmatch(r"\d+\.\d+\.\d+", current) else None
+    latest_core = tuple(int(part) for part in latest.split(".")[:3]) if re.fullmatch(r"\d+\.\d+\.\d+", latest) else None
+    return {"current_version": current, "latest_version": latest,
+            "update_available": current_core is not None and latest_core is not None and latest_core > current_core,
+            "update_command": "npm install -g synfull@latest\nsynfull reload",
+            "package_url": "https://www.npmjs.com/package/synfull"}
+
+
 @router.get("/settings")
 def settings_summary(request: Request):
     management.require_admin(request)
@@ -278,6 +318,7 @@ def settings_summary(request: Request):
     return {
         "bind_host": settings.bind_host,
         "bind_port": settings.bind_port,
+        "version": installed_version(),
         "state_dir": str(settings.state_dir),
         "database_path": str(settings.resolved_database_path),
         "log_dir": str(settings.resolved_log_dir),

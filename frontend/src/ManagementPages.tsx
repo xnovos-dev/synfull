@@ -5,6 +5,7 @@ import { Area, AreaChart, CartesianGrid, Legend, ResponsiveContainer, Tooltip, X
 export type AuthInfo = { setup_required: boolean; authenticated: boolean; username: string | null; role?: string | null; permissions?: string[]; theme?: string; must_change_password?: boolean; default_login_available?: boolean; setup_instructions: string | null }
 type Entry = Record<string, string | number | boolean | string[] | null | undefined>
 type HistoryDiscordConfig = { enabled: boolean; configured: boolean; webhook_url_masked: string; webhook_username: string; avatar_url: string }
+type PackageUpdate = { current_version: string; latest_version: string; update_available: boolean; update_command: string; package_url: string }
 type Kind = 'services' | 'jobs' | 'network' | 'storage' | 'history' | 'audit' | 'security' | 'logs' | 'settings'
 
 async function api(path: string, init?: RequestInit) {
@@ -78,6 +79,14 @@ export function ManagementPage({ kind, auth, onThemeChange }: { kind: Kind; auth
   const [historyDiscordBusy, setHistoryDiscordBusy] = useState(false)
   const [historyDiscordMessage, setHistoryDiscordMessage] = useState('')
   const [historyDiscordError, setHistoryDiscordError] = useState('')
+  const [installedVersion, setInstalledVersion] = useState('Loading…')
+  const [packageUpdate, setPackageUpdate] = useState<PackageUpdate>({
+    current_version: 'unknown', latest_version: '', update_available: false,
+    update_command: 'npm install -g synfull@latest\nsynfull reload',
+    package_url: 'https://www.npmjs.com/package/synfull',
+  })
+  const [updateCheckBusy, setUpdateCheckBusy] = useState(false)
+  const [updateCheckError, setUpdateCheckError] = useState('')
   useEffect(() => { if (auth?.role) setSettingsRole(auth.role) }, [auth?.role])
   const visibleRole = settingsRole ?? auth?.role
 
@@ -131,6 +140,20 @@ export function ManagementPage({ kind, auth, onThemeChange }: { kind: Kind; auth
       .catch(cause => { if (active) setHistoryDiscordError(cause instanceof Error ? cause.message : 'Unable to load webhook settings') })
     return () => { active = false }
   }, [kind])
+  useEffect(() => {
+    if (kind !== 'settings') return
+    let active = true
+    void api('/api/v1/settings').then(config => {
+      if (active) {
+        setInstalledVersion(config.version)
+        setPackageUpdate(current => current ? { ...current, current_version: config.version } : {
+          current_version: config.version, latest_version: '', update_available: false,
+          update_command: 'npm install -g synfull@latest\nsynfull reload', package_url: 'https://www.npmjs.com/package/synfull',
+        })
+      }
+    }).catch(() => {})
+    return () => { active = false }
+  }, [kind])
   useEffect(() => { if(kind==='logs')void refresh() }, [query])
 
   const save = async (path: string, body: unknown, success: string) => {
@@ -138,6 +161,15 @@ export function ManagementPage({ kind, auth, onThemeChange }: { kind: Kind; auth
     try { await api(path, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }); setMessage(success); await refresh() }
     catch (cause) { setError(cause instanceof Error ? cause.message : 'Unable to save settings') }
     finally { setBusy(false) }
+  }
+  const checkPackageUpdate = async () => {
+    setUpdateCheckBusy(true); setUpdateCheckError(''); setMessage('')
+    try {
+      const result = await api('/api/v1/settings/update-check')
+      setPackageUpdate(result)
+      setMessage(result.update_available ? `Synfull ${result.latest_version} is available.` : `Synfull ${result.current_version} is up to date.`)
+    } catch (cause) { setUpdateCheckError(cause instanceof Error ? cause.message : 'Could not check for updates') }
+    finally { setUpdateCheckBusy(false) }
   }
   const saveHistoryDiscord = async () => {
     if (!historyDiscord) return
@@ -233,6 +265,7 @@ export function ManagementPage({ kind, auth, onThemeChange }: { kind: Kind; auth
     {kind === 'storage' && <><section className="info-grid storage-volume-grid">{volumes.map(volume=><article className="panel info-card" key={String(volume.mountpoint)}><div className="panel-head"><div><h2>{String(volume.mountpoint)}</h2><p>{String(volume.device??'Volume')} · {String(volume.filesystem??'')}</p></div></div><div className="volume-bar"><span style={{width:`${Math.min(100,Number(volume.total)?Number(volume.used)/Number(volume.total)*100:0)}%`}}/></div><div className="volume-caption">{(Number(volume.used)/1024**3).toFixed(1)} GB used · {(Number(volume.free)/1024**3).toFixed(1)} GB free of {(Number(volume.total)/1024**3).toFixed(1)} GB</div></article>)}</section><section className="panel table-panel"><div className="panel-head"><div><h2>Configured backup checks</h2><p>Freshness is determined from the newest file in each configured path.</p></div></div><EntryTable rows={rows} columns={['name','path','status','age_hours','max_age_hours','message']} renderAction={(_,index)=><button className="console-button" disabled={busy} onClick={()=>removeTarget(index,'storage')}>Remove</button>}/></section><section className="panel table-panel"><div className="panel-head"><div><h2>Disk health (SMART)</h2><p>Requires smartmontools and permissions to inspect disks.</p></div></div><EntryTable rows={secondary} columns={['device','status','message']}/></section></>}
     {kind === 'network' && <section className="panel table-panel"><div className="panel-head"><div><h2>Endpoint status</h2><p>Checks run every minute while Synfull is running.</p></div></div>{message&&<div className="alert-success" role="status">{message}</div>}{error&&<div className="alert" role="alert">{error}</div>}<EntryTable rows={rows} columns={['name','url','status','response_code','response_ms','tls_days_remaining','message']} renderAction={(_,index)=><button className="console-button" disabled={busy} onClick={()=>removeTarget(index,'network')}>Remove</button>}/></section>}
     {kind === 'settings' && <>
+      <section className="panel config-panel"><h2>Synfull updates</h2><p className="muted">Installed version: <strong>{installedVersion}</strong>. Check npm for the latest published package version.</p><div className="update-actions"><button className="console-button secondary-button" disabled={updateCheckBusy} onClick={()=>void checkPackageUpdate()}>{updateCheckBusy?'Checking…':'Check for updates'}</button>{packageUpdate.package_url&&<a className="text-link" href={packageUpdate.package_url} target="_blank" rel="noreferrer">View npm package ↗</a>}</div>{packageUpdate.latest_version&&<p className="update-result">Latest npm version: <strong>{packageUpdate.latest_version}</strong>{packageUpdate.update_available?' · Update available':' · Up to date'}</p>}{updateCheckError&&<div className="alert" role="alert">{updateCheckError}</div>}<div className="update-command"><span>Update command</span><code>{packageUpdate.update_command}</code></div></section>
       <section className="panel config-panel"><h2>Dashboard theme</h2><p className="muted">Themes are saved to your account and follow you when you sign in.</p><div className="theme-grid">{[['synfull','Synfull Dark','The original glass dashboard theme.'],['monochrome','Monochrome','A restrained grayscale interface with subtle contrast.'],['hacker','Hacker Terminal','A high-contrast green terminal-inspired interface.'],['light','Light','A clean, bright interface for well-lit environments.'],['oled','OLED Black','Near-black surfaces for OLED displays.']].map(([id,label,description])=><button key={id} className={`theme-choice${auth?.theme===id?' selected':''}`} onClick={async()=>{setError('');try{await api('/api/v1/auth/preferences/theme',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({theme:id})});onThemeChange?.(id);setMessage(`${label} theme saved.`)}catch(cause){setError(cause instanceof Error?cause.message:'Could not save theme')}}}><strong>{label}</strong><span>{description}</span></button>)}</div></section>
       {visibleRole==='admin'&&<section className="panel config-panel"><h2>User accounts</h2><p className="muted">Create administrators or guests and configure what each guest can view or change.</p><div className="form-row"><input className="form-input" placeholder="Username" value={newUsername} onChange={event=>setNewUsername(event.target.value)}/><input className="form-input" type="password" placeholder="Temporary password (12+ characters)" value={newPassword} onChange={event=>setNewPassword(event.target.value)}/><select className="form-input" value={newRole} onChange={event=>setNewRole(event.target.value)}><option value="guest">Guest</option><option value="admin">Admin</option></select><select className="form-input" value={newTheme} onChange={event=>setNewTheme(event.target.value)}><option value="synfull">Synfull Dark</option><option value="monochrome">Monochrome</option><option value="hacker">Hacker Terminal</option><option value="light">Light</option><option value="oled">OLED Black</option></select><button className="console-button" disabled={busy||newUsername.trim().length===0||newPassword.length<12} onClick={()=>void createManagedUser()}>Create account</button></div>{newRole==='guest'&&<div className="permission-grid">{Object.entries(availablePermissions).map(([permission,label])=><label key={permission} className="alert-option"><input type="checkbox" checked={newPermissions.includes(permission)} onChange={event=>setNewPermissions(current=>event.target.checked?[...current,permission]:current.filter(item=>item!==permission))}/><span className="check-ui"/><span>{label}</span></label>)}</div>}</section>}
       {visibleRole==='admin'&&<section className="panel table-panel"><div className="panel-head"><div><h2>Existing accounts</h2><p>Disabling an account revokes its active sessions.</p></div></div><div className="user-list">{userRows.map(row=><article className="user-card" key={String(row.id)}><div className="user-card-heading"><strong>{String(row.username)}</strong><span>{String(row.role)} · {row.enabled?'Enabled':'Disabled'}</span></div><div className="form-row"><select className="form-input" value={String(row.role)} onChange={event=>void updateManagedUser(row,{role:event.target.value,permissions:event.target.value==='admin'?['*']:row.role==='admin'?[]:row.permissions})}><option value="admin">Admin</option><option value="guest">Guest</option></select><select className="form-input" value={String(row.theme)} onChange={event=>void updateManagedUser(row,{theme:event.target.value})}><option value="synfull">Synfull Dark</option><option value="monochrome">Monochrome</option><option value="hacker">Hacker Terminal</option><option value="light">Light</option><option value="oled">OLED Black</option></select><input className="form-input" type="password" placeholder="New password (optional)" value={passwordResets[String(row.id)]??''} onChange={event=>setPasswordResets(current=>({...current,[String(row.id)]:event.target.value}))}/><button className="console-button" disabled={busy||Boolean(passwordResets[String(row.id)]&&passwordResets[String(row.id)].length<12)} onClick={()=>void updateManagedUser(row,{enabled:!row.enabled,password:passwordResets[String(row.id)]||undefined})}>{row.enabled?'Disable / save':'Enable / save'}</button></div>{row.role==='guest'&&<div className="permission-grid">{Object.entries(availablePermissions).map(([permission,label])=><label key={permission} className="alert-option"><input type="checkbox" checked={(row.permissions as string[]).includes(permission)} onChange={event=>void updateManagedUser(row,{permissions:event.target.checked?[...(row.permissions as string[]),permission]:(row.permissions as string[]).filter(item=>item!==permission)})}/><span className="check-ui"/><span>{label}</span></label>)}</div>}</article>)}</div></section>}

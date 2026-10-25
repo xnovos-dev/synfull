@@ -1,4 +1,5 @@
 from pathlib import Path
+import urllib.request
 
 import pytest
 from fastapi.testclient import TestClient
@@ -194,12 +195,45 @@ def test_docker_management_routes_validate_actions_and_identifiers(client):
     assert client.get("/api/v1/docker/containers/api/logs?tail=0").status_code == 422
 
 
-def test_settings_summary_exposes_paths_without_secrets(client):
+def test_settings_summary_exposes_version_and_paths_without_secrets(client):
     response = client.get("/api/v1/settings")
     assert response.status_code == 200
     body = response.json()
-    assert {"bind_host", "bind_port", "state_dir", "database_path", "log_dir", "collection_interval_seconds"} <= body.keys()
+    assert {"bind_host", "bind_port", "version", "state_dir", "database_path", "log_dir", "collection_interval_seconds"} <= body.keys()
+    assert body["version"] != "unknown"
     assert "initial_admin_token" not in body
+
+
+def test_update_check_reports_newer_npm_version(client, monkeypatch):
+    from app.api import routes
+
+    class RegistryResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self, _limit):
+            return b'{"version":"99.0.0"}'
+
+    monkeypatch.setattr(routes, "installed_version", lambda: "0.1.4")
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *_args, **_kwargs: RegistryResponse())
+
+    response = client.get("/api/v1/settings/update-check")
+    assert response.status_code == 200
+    assert response.json() == {
+        "current_version": "0.1.4",
+        "latest_version": "99.0.0",
+        "update_available": True,
+        "update_command": "npm install -g synfull@latest\nsynfull reload",
+        "package_url": "https://www.npmjs.com/package/synfull",
+    }
+
+
+def test_update_check_requires_admin_authentication():
+    with TestClient(app) as anonymous:
+        assert anonymous.get("/api/v1/settings/update-check").status_code == 401
 
 
 def test_management_routes_require_authentication():
