@@ -5,9 +5,11 @@ from fastapi import APIRouter, HTTPException, Query, Request, Response
 from ..collectors.processes import collect_processes
 from ..collectors.system import collect_system_metrics, platform_capabilities
 from ..config import get_settings
-from ..integrations.discord_alerts import public_config as discord_alert_config, send_test_message, update_config as update_discord_alert_config
+from ..integrations.discord_alerts import (public_config as discord_alert_config, public_history_config,
+                                           send_test_message, update_config as update_discord_alert_config,
+                                           update_history_config)
 from ..integrations.status import docker_action, docker_logs, integrations_status
-from ..schemas.alerts import DiscordAlertUpdate
+from ..schemas.alerts import DiscordAlertUpdate, HistoryDiscordAlertUpdate
 from ..schemas.system import ProcessResponse, SystemResponse
 from ..schemas.management import AdminSetup, BackupTargetsUpdate, EndpointTargetsUpdate, LoginPayload, PasswordChange, ServiceAllowlistUpdate, ThresholdUpdate, ThemeUpdate, UserCreate, UserUpdate
 from ..services import management
@@ -175,7 +177,8 @@ def put_discord_alert_config(payload: DiscordAlertUpdate, request: Request):
     try:
         result = update_discord_alert_config(enabled=payload.enabled, webhook_url=webhook_url,
                                              events=payload.events,
-                                             minimum_interval_seconds=payload.minimum_interval_seconds)
+                                             minimum_interval_seconds=payload.minimum_interval_seconds,
+                                             webhook_username=payload.webhook_username, avatar_url=payload.avatar_url)
         management._audit(username=management.require_admin(request), action="docker.alerts.discord.update")
         return result
     except ValueError as exc:
@@ -186,11 +189,47 @@ def put_discord_alert_config(payload: DiscordAlertUpdate, request: Request):
 def test_discord_alert(request: Request):
     management.require_admin(request)
     try:
-        send_test_message()
+        send_test_message("docker")
         management._audit(username=management.require_admin(request), action="docker.alerts.discord.test")
         return {"sent": True, "message": "Test alert sent to Discord."}
     except Exception as exc:
         management._audit(username=management.require_admin(request), action="docker.alerts.discord.test", outcome="failed", details=str(exc))
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.get("/management/metrics/discord")
+def get_history_discord_config(request: Request):
+    management.require_admin(request)
+    return public_history_config()
+
+
+@router.put("/management/metrics/discord")
+def put_history_discord_config(payload: HistoryDiscordAlertUpdate, request: Request):
+    username = management.require_admin(request)
+    current = public_history_config()
+    webhook_url = "" if payload.clear_webhook else (payload.webhook_url or None)
+    if payload.enabled and not current["configured"] and webhook_url is None:
+        raise HTTPException(status_code=400, detail="Set a Discord webhook URL before enabling alerts")
+    if payload.enabled and webhook_url == "":
+        raise HTTPException(status_code=400, detail="Set a Discord webhook URL before enabling alerts")
+    try:
+        result = update_history_config(enabled=payload.enabled, webhook_url=webhook_url,
+                                       webhook_username=payload.webhook_username, avatar_url=payload.avatar_url)
+        management._audit(username=username, action="monitoring.alerts.discord.update")
+        return result
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/management/metrics/discord/test")
+def test_history_discord_alert(request: Request):
+    username = management.require_admin(request)
+    try:
+        send_test_message("history")
+        management._audit(username=username, action="monitoring.alerts.discord.test")
+        return {"sent": True, "message": "Test alert sent to Discord."}
+    except Exception as exc:
+        management._audit(username=username, action="monitoring.alerts.discord.test", outcome="failed", details=str(exc))
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 

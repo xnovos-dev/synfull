@@ -15,6 +15,7 @@ def isolated_settings(tmp_path, monkeypatch):
     monkeypatch.setattr(alerts, "engine", test_engine)
     monkeypatch.setattr(alerts, "SessionLocal", sessionmaker(bind=test_engine, autoflush=False, autocommit=False))
     alerts.update_config(enabled=False, webhook_url="", events=alerts.DEFAULT_EVENTS, minimum_interval_seconds=0)
+    alerts.update_history_config(enabled=False, webhook_url="", webhook_username=alerts.HISTORY_WEBHOOK_USERNAME, avatar_url=alerts.WEBHOOK_AVATAR_URL)
 
 
 def test_update_settings_masks_webhook_and_preserves_secret_when_url_omitted(isolated_settings):
@@ -57,6 +58,41 @@ def test_lifecycle_monitor_maps_events_filters_and_throttles(isolated_settings):
     assert "Crashed unexpectedly." in send.call_args_list[2].args[0]
     assert send.call_args_list[0].kwargs["title"] == "Container started"
     assert "**Container:** `api`" in send.call_args_list[0].args[0]
+
+
+def test_history_webhook_is_independent_and_persists_custom_identity(isolated_settings):
+    alerts.update_config(enabled=False, webhook_url="https://discord.com/api/webhooks/1/docker-token",
+                         events=alerts.DEFAULT_EVENTS, minimum_interval_seconds=0,
+                         webhook_username="Docker alerts", avatar_url="https://example.com/docker.png")
+    saved = alerts.update_history_config(enabled=True,
+                                         webhook_url="https://discord.com/api/webhooks/2/history-token",
+                                         webhook_username="Host alerts", avatar_url="https://example.com/host.png")
+    assert saved["configured"] is True
+    assert saved["webhook_username"] == "Host alerts"
+    assert saved["avatar_url"] == "https://example.com/host.png"
+    assert "history-token" not in json.dumps(saved)
+    assert alerts.public_config()["webhook_username"] == "Docker alerts"
+    with patch.object(alerts, "urlopen") as post:
+        class Response:
+            status = 204
+            def __enter__(self): return self
+            def __exit__(self, *args): return False
+        post.return_value = Response()
+        alerts.send_discord_message("History event", channel="history")
+        request = post.call_args.args[0]
+        payload = json.loads(request.data)
+        assert request.full_url == "https://discord.com/api/webhooks/2/history-token"
+        assert payload["username"] == "Host alerts"
+        assert payload["avatar_url"] == "https://example.com/host.png"
+
+
+def test_custom_webhook_identity_is_validated(isolated_settings):
+    with pytest.raises(ValueError, match="name"):
+        alerts.update_config(enabled=False, webhook_url=None, events=alerts.DEFAULT_EVENTS,
+                             minimum_interval_seconds=0, webhook_username=" ")
+    with pytest.raises(ValueError, match="HTTPS"):
+        alerts.update_history_config(enabled=False, webhook_url=None,
+                                     webhook_username="History", avatar_url="http://example.com/avatar.png")
 
 
 def test_test_message_posts_json_with_timeout(isolated_settings):

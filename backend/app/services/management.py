@@ -350,6 +350,8 @@ def _permission_for_request(request) -> str | None:
     if path == "capabilities": return "view_dashboard"
     if path == "docker/alerts/discord": return "manage_alerts" if method in {"PUT", "POST"} else "view_alerts"
     if path == "docker/alerts/discord/test": return "manage_alerts"
+    if path == "management/metrics/discord": return "manage_alerts" if method == "PUT" else "view_alerts"
+    if path == "management/metrics/discord/test": return "manage_alerts"
     if path.startswith("docker/containers/"):
         return "manage_docker" if method == "POST" else "view_docker"
     if path.startswith("management/users"): return "view_security"
@@ -980,9 +982,9 @@ def collect_monitoring_sample() -> None:
         session.commit()
     for title, message in notifications:
         try:
-            from ..integrations.discord_alerts import public_config, send_discord_message
-            if public_config()["enabled"]:
-                send_discord_message(message, title=title)
+            from ..integrations.discord_alerts import public_history_config, send_discord_message
+            if public_history_config()["enabled"]:
+                send_discord_message(message, title=title, channel="history")
         except Exception as exc:
             logger.debug("Metric alert notification unavailable: %s", exc)
 
@@ -1004,8 +1006,8 @@ def run_configured_checks() -> None:
             continue
         if result["status"] == "unhealthy" or (result.get("tls_days_remaining") is not None and result["tls_days_remaining"] <= 30):
             try:
-                from ..integrations.discord_alerts import public_config, send_discord_message
-                if public_config()["enabled"]:
+                from ..integrations.discord_alerts import public_history_config, send_discord_message
+                if public_history_config()["enabled"]:
                     send_discord_message(
                         "\n".join((
                             f"⚠️ **Endpoint:** {target['name']}",
@@ -1014,6 +1016,7 @@ def run_configured_checks() -> None:
                             f"**Details:** {result['message']}",
                         )),
                         title="Endpoint health alert",
+                        channel="history",
                     )
             except Exception as exc:
                 logger.debug("Endpoint alert notification unavailable: %s", exc)

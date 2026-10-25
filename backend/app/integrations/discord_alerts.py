@@ -23,6 +23,18 @@ class DiscordAlertConfig(Base):
     enabled = Column(Boolean, nullable=False, default=False)
     events_json = Column(Text, nullable=False, default='{"start":true,"stop":true,"crash":true,"restart":true}')
     minimum_interval_seconds = Column(Integer, nullable=False, default=60)
+    webhook_username = Column(Text, nullable=False, default="Synfull - AIO Monitoring Software")
+    avatar_url = Column(Text, nullable=False, default="https://api.iconify.design/lucide/activity.svg?color=%23ffffff")
+
+
+class HistoryDiscordAlertConfig(Base):
+    __tablename__ = "history_discord_alert_config"
+
+    id = Column(Integer, primary_key=True, default=1)
+    webhook_url = Column(Text, nullable=False, default="")
+    enabled = Column(Boolean, nullable=False, default=False)
+    webhook_username = Column(Text, nullable=False, default="Synfull - Monitoring Alerts")
+    avatar_url = Column(Text, nullable=False, default="https://api.iconify.design/lucide/activity.svg?color=%23ffffff")
 
 
 Base.metadata.create_all(bind=engine)
@@ -31,6 +43,22 @@ DEFAULT_EVENTS = {"start": True, "stop": True, "crash": True, "restart": True}
 EMBED_BLUE = 0x3B82F6
 WEBHOOK_USERNAME = "Synfull - AIO Monitoring Software"
 WEBHOOK_AVATAR_URL = "https://api.iconify.design/lucide/activity.svg?color=%23ffffff"
+HISTORY_WEBHOOK_USERNAME = "Synfull - Monitoring Alerts"
+
+
+def _migrate_docker_config_schema() -> None:
+    from sqlalchemy import inspect
+    columns = {column["name"] for column in inspect(engine).get_columns("discord_alert_config")}
+    with engine.begin() as connection:
+        if "webhook_username" not in columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE discord_alert_config ADD COLUMN webhook_username TEXT NOT NULL DEFAULT 'Synfull - AIO Monitoring Software'")
+        if "avatar_url" not in columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE discord_alert_config ADD COLUMN avatar_url TEXT NOT NULL DEFAULT 'https://api.iconify.design/lucide/activity.svg?color=%23ffffff'")
+
+
+_migrate_docker_config_schema()
 
 
 def _config_from_db() -> DiscordAlertConfig:
@@ -42,6 +70,38 @@ def _config_from_db() -> DiscordAlertConfig:
             session.commit()
             session.refresh(config)
         return config
+
+
+def _history_config_from_db() -> HistoryDiscordAlertConfig:
+    with SessionLocal() as session:
+        config = session.get(HistoryDiscordAlertConfig, 1)
+        if config is None:
+            config = HistoryDiscordAlertConfig(id=1)
+            session.add(config)
+            session.commit()
+            session.refresh(config)
+        return config
+
+
+def _validate_webhook_url(webhook_url: str) -> str:
+    normalized_url = webhook_url.strip()
+    parsed = urlparse(normalized_url)
+    if (parsed.scheme != "https" or parsed.hostname != "discord.com"
+            or not parsed.path.startswith("/api/webhooks/") or parsed.username or parsed.password):
+        raise ValueError("Enter a valid Discord HTTPS webhook URL")
+    return normalized_url
+
+
+def _validate_identity(webhook_username: str, avatar_url: str) -> tuple[str, str]:
+    username = webhook_username.strip()
+    avatar = avatar_url.strip()
+    if not username or len(username) > 80:
+        raise ValueError("Webhook name must be between 1 and 80 characters")
+    if avatar:
+        parsed = urlparse(avatar)
+        if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+            raise ValueError("Webhook avatar URL must be a valid HTTPS URL")
+    return username, avatar
 
 
 def _parse_events(raw: str) -> dict[str, bool]:
@@ -56,10 +116,40 @@ def public_config() -> dict[str, Any]:
     config = _config_from_db()
     masked = "https://discord.com/api/webhooks/••••••••" if config.webhook_url else ""
     return {"enabled": config.enabled, "configured": bool(config.webhook_url), "webhook_url_masked": masked,
+            "webhook_username": config.webhook_username, "avatar_url": config.avatar_url,
             "events": _parse_events(config.events_json), "minimum_interval_seconds": config.minimum_interval_seconds}
 
 
-def update_config(*, enabled: bool, webhook_url: str | None, events: dict[str, bool], minimum_interval_seconds: int) -> dict[str, Any]:
+def public_history_config() -> dict[str, Any]:
+    config = _history_config_from_db()
+    masked = "https://discord.com/api/webhooks/••••••••" if config.webhook_url else ""
+    return {"enabled": config.enabled, "configured": bool(config.webhook_url), "webhook_url_masked": masked,
+            "webhook_username": config.webhook_username, "avatar_url": config.avatar_url}
+
+
+def update_history_config(*, enabled: bool, webhook_url: str | None, webhook_username: str, avatar_url: str) -> dict[str, Any]:
+    username, avatar = _validate_identity(webhook_username, avatar_url)
+    with SessionLocal() as session:
+        config = session.get(HistoryDiscordAlertConfig, 1)
+        if config is None:
+            config = HistoryDiscordAlertConfig(id=1)
+            session.add(config)
+            session.flush()
+        if webhook_url == "":
+            config.webhook_url = ""
+        elif webhook_url is not None:
+            config.webhook_url = _validate_webhook_url(webhook_url)
+        if enabled and not config.webhook_url:
+            raise ValueError("Set a Discord webhook URL before enabling alerts")
+        config.enabled = enabled
+        config.webhook_username = username
+        config.avatar_url = avatar
+        session.commit()
+    return public_history_config()
+
+
+def update_config(*, enabled: bool, webhook_url: str | None, events: dict[str, bool], minimum_interval_seconds: int,
+                  webhook_username: str = WEBHOOK_USERNAME, avatar_url: str = WEBHOOK_AVATAR_URL) -> dict[str, Any]:
     with SessionLocal() as session:
         config = session.get(DiscordAlertConfig, 1)
         if config is None:
@@ -69,27 +159,34 @@ def update_config(*, enabled: bool, webhook_url: str | None, events: dict[str, b
         if webhook_url == "":
             config.webhook_url = ""
         elif webhook_url is not None:
-            normalized_url = webhook_url.strip()
-            parsed = urlparse(normalized_url)
-            if parsed.scheme != "https" or parsed.hostname != "discord.com" or not parsed.path.startswith("/api/webhooks/") or parsed.username or parsed.password:
-                raise ValueError("Enter a valid Discord HTTPS webhook URL")
-            config.webhook_url = normalized_url
+            config.webhook_url = _validate_webhook_url(webhook_url)
+        username, avatar = _validate_identity(webhook_username, avatar_url)
         if minimum_interval_seconds < 0 or minimum_interval_seconds > 3600:
             raise ValueError("Minimum alert interval must be between 0 and 3600 seconds")
         config.enabled = enabled
         config.events_json = json.dumps({key: bool(events.get(key, False)) for key in DEFAULT_EVENTS})
         config.minimum_interval_seconds = minimum_interval_seconds
+        config.webhook_username = username
+        config.avatar_url = avatar
         session.commit()
     return public_config()
 
 
-def send_discord_message(content: str, *, title: str = "Monitoring alert", timeout_seconds: float = 8.0) -> None:
-    config = _config_from_db()
-    if not config.webhook_url:
-        raise ValueError("Configure a Discord webhook URL first")
+def send_discord_message(content: str, *, title: str = "Monitoring alert", timeout_seconds: float = 8.0,
+                         channel: str = "docker") -> None:
+    if channel == "history":
+        config = _history_config_from_db()
+        default_username = HISTORY_WEBHOOK_USERNAME
+        if not config.enabled or not config.webhook_url:
+            raise ValueError("Configure and enable the History & Alerts Discord webhook first")
+    else:
+        config = _config_from_db()
+        default_username = WEBHOOK_USERNAME
+        if not config.webhook_url:
+            raise ValueError("Configure a Discord webhook URL first")
     payload = {
-        "username": WEBHOOK_USERNAME,
-        "avatar_url": WEBHOOK_AVATAR_URL,
+        "username": config.webhook_username or default_username,
+        "avatar_url": config.avatar_url or WEBHOOK_AVATAR_URL,
         "allowed_mentions": {"parse": []},
         "embeds": [{
             "title": title[:256],
@@ -110,7 +207,7 @@ def send_discord_message(content: str, *, title: str = "Monitoring alert", timeo
         raise RuntimeError("Could not reach Discord webhook. Check the connection and webhook URL.") from None
 
 
-def send_test_message() -> None:
+def send_test_message(channel: str = "docker") -> None:
     send_discord_message(
         "\n".join((
             "✅ **Webhook connected successfully**",
@@ -118,6 +215,7 @@ def send_test_message() -> None:
             "Synfull can now deliver monitoring alerts to this channel.",
         )),
         title="Webhook test",
+        channel=channel,
     )
 
 

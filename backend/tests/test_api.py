@@ -90,18 +90,38 @@ def test_optional_integrations_endpoint_is_available(client):
         assert {"installed", "available", "status", "message"} <= integration.keys()
 
 
-def test_discord_alert_api_masks_secret_and_requires_webhook_when_enabled(client):
-    from app.integrations.discord_alerts import DEFAULT_EVENTS, update_config
+def test_discord_alert_api_masks_secret_and_requires_webhook_when_enabled(client, monkeypatch):
+    from app.integrations.discord_alerts import (DEFAULT_EVENTS, HISTORY_WEBHOOK_USERNAME, WEBHOOK_AVATAR_URL,
+                                                 update_config, update_history_config)
     update_config(enabled=False, webhook_url="", events=DEFAULT_EVENTS, minimum_interval_seconds=0)
+    update_history_config(enabled=False, webhook_url="", webhook_username=HISTORY_WEBHOOK_USERNAME,
+                          avatar_url=WEBHOOK_AVATAR_URL)
     assert client.put("/api/v1/docker/alerts/discord", json={"enabled": True}).status_code == 400
     response = client.put("/api/v1/docker/alerts/discord", json={
         "enabled": True, "webhook_url": "https://discord.com/api/webhooks/123/secret",
         "events": {"start": True, "stop": True, "crash": True, "restart": True},
         "minimum_interval_seconds": 30,
+        "webhook_username": "Custom Docker bot",
+        "avatar_url": "https://example.com/docker.png",
     })
     assert response.status_code == 200
     assert "secret" not in response.text
     assert client.get("/api/v1/docker/alerts/discord").json()["configured"] is True
+    docker_config = client.get("/api/v1/docker/alerts/discord").json()
+    assert docker_config["webhook_username"] == "Custom Docker bot"
+    assert docker_config["avatar_url"] == "https://example.com/docker.png"
+    history = client.put("/api/v1/management/metrics/discord", json={
+        "enabled": True, "webhook_url": "https://discord.com/api/webhooks/456/history-secret",
+        "webhook_username": "Custom History bot", "avatar_url": "https://example.com/history.png",
+    })
+    assert history.status_code == 200, history.text
+    assert history.json()["webhook_username"] == "Custom History bot"
+    assert history.json()["avatar_url"] == "https://example.com/history.png"
+    assert "history-secret" not in history.text
+    assert client.get("/api/v1/management/metrics/discord").json()["webhook_username"] == "Custom History bot"
+    monkeypatch.setattr("app.api.routes.send_test_message", lambda channel: None)
+    assert client.post("/api/v1/management/metrics/discord/test").status_code == 200
+    assert client.get("/api/v1/docker/alerts/discord").json()["webhook_username"] == "Custom Docker bot"
     update_config(enabled=False, webhook_url="", events=DEFAULT_EVENTS, minimum_interval_seconds=0)
 
 
