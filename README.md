@@ -114,20 +114,6 @@ PYTHONPATH=backend python -m pytest backend/tests
 npm --prefix frontend run lint
 ```
 
-## Packaging and publishing
-
-The root `package.json` defines the npm CLI package. The published package includes the Python application, runtime requirements, built dashboard, CLI, README, and MIT license. Before publishing, build and inspect the tarball:
-
-```sh
-npm pack --dry-run
-```
-
-Publishing requires an npm account with permission to publish the package name:
-
-```sh
-npm publish
-```
-
 ## License
 
 Synfull is released under the [MIT License](LICENSE).
